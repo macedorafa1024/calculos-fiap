@@ -1,0 +1,194 @@
+# src/python/calculos.py
+
+from math import floor
+from typing import Dict, Tuple
+
+ESPACAMENTO_MIN_M = 0.45
+ESPACAMENTO_MAX_M = 0.50
+
+# Doses padrão (kg por hectare)
+DOSES_PADRAO = {
+    "milho": {
+        "N_total_kg_ha": 200,                     # N total
+        "N_plantio_kg_ha": 45,                    # dentro do intervalo 30–60 (ajustável)
+        "P2O5_plantio_kg_ha": 110,                # todo no plantio
+        "K2O_total_kg_ha": 90,                    # pode parcelar
+        "K2O_plantio_pct": 0.5,                   # 50% no plantio (ajustável)
+    },
+    "soja": {
+        "P2O5_plantio_kg_ha": 30,                 # todo no sulco
+        "K2O_total_kg_ha": 60,                    # até 50 kg/ha no sulco
+        "K2O_plantio_max_kg_ha": 50,              # limite no sulco
+    },
+}
+
+def area_retangular(largura_m: float, comprimento_m: float) -> Tuple[float, float]:
+    """
+    Calcula área retangular.
+    Retorna (area_m2, area_ha).
+    1 hectare = 10.000 m².
+    """
+    if largura_m <= 0 or comprimento_m <= 0:
+        raise ValueError("largura e comprimento devem ser positivos.")
+    area_m2 = largura_m * comprimento_m
+    area_ha = area_m2 / 10_000
+    return area_m2, area_ha
+
+
+def validar_espacamento(espacamento_m: float) -> None:
+    """
+    Valida se o espaçamento está entre 0,45 e 0,50 m.
+    """
+    if not (ESPACAMENTO_MIN_M <= espacamento_m <= ESPACAMENTO_MAX_M):
+        raise ValueError(
+            f"Espaçamento deve estar entre {ESPACAMENTO_MIN_M:.2f} m e {ESPACAMENTO_MAX_M:.2f} m."
+        )
+
+
+def numero_linhas(largura_m: float, espacamento_m: float) -> int:
+    """
+    Calcula o número de linhas (ruas) em um talhão retangular:
+    n_linhas = floor(largura_m / espacamento_m)
+    """
+    if largura_m <= 0:
+        raise ValueError("largura deve ser positiva.")
+    validar_espacamento(espacamento_m)
+    return max(1, floor(largura_m / espacamento_m))
+
+
+def metros_totais_de_rua(
+    largura_m: float, comprimento_m: float, espacamento_m: float
+) -> Tuple[int, float]:
+    """
+    Retorna (n_linhas, metros_totais):
+    - n_linhas = floor(largura_m / espacamento_m)
+    - metros_totais = n_linhas * comprimento_m
+    """
+    if comprimento_m <= 0:
+        raise ValueError("comprimento deve ser positivo.")
+    n = numero_linhas(largura_m, espacamento_m)
+    metros = n * comprimento_m
+    return n, metros
+
+
+def parcelar_nitrogenio_milho(n_total_kg_ha: float, n_plantio_kg_ha: float) -> Tuple[float, float]:
+    """
+    Para milho: parcela N entre plantio e cobertura.
+    Garante que o plantio fique entre 30 e 60 kg/ha (ajuste externo recomendado).
+    Retorna (N_plantio_kg_ha, N_cobertura_kg_ha).
+    """
+    if n_total_kg_ha <= 0:
+        raise ValueError("N total deve ser positivo.")
+    if not (30 <= n_plantio_kg_ha <= 60):
+        raise ValueError("N no plantio para milho deve ficar entre 30 e 60 kg/ha.")
+    n_cobertura = max(0.0, n_total_kg_ha - n_plantio_kg_ha)
+    return n_plantio_kg_ha, n_cobertura
+
+
+def insumos_por_hectare(cultura: str, overrides: Dict = None) -> Dict[str, Dict[str, float]]:
+    """
+    Calcula as doses por hectare de acordo com a cultura e as regras do enunciado.
+    Pode receber 'overrides' para ajustar doses (ex.: {'milho': {'K2O_plantio_pct': 0.4}}).
+    Retorna um dicionário com chaves por insumo e fases 'plantio'/'cobertura'.
+
+    Exemplo de retorno para milho:
+    {
+      'N': {'plantio': 45, 'cobertura': 155},
+      'P2O5': {'plantio': 110, 'cobertura': 0},
+      'K2O': {'plantio': 45, 'cobertura': 45}
+    }
+    """
+    cultura = cultura.lower()
+    if cultura not in DOSES_PADRAO:
+        raise ValueError("Cultura não suportada. Use 'milho' ou 'soja'.")
+
+    cfg = {k: v for k, v in DOSES_PADRAO[cultura].items()}
+    overrides = overrides or {}
+    for k, v in overrides.items():
+        cfg[k] = v
+
+    if cultura == "milho":
+        n_plantio, n_cob = parcelar_nitrogenio_milho(
+            cfg["N_total_kg_ha"],
+            cfg["N_plantio_kg_ha"],
+        )
+        k_plantio = cfg["K2O_total_kg_ha"] * float(cfg.get("K2O_plantio_pct", 0.5))
+        k_cob = max(0.0, cfg["K2O_total_kg_ha"] - k_plantio)
+        return {
+            "N": {"plantio": n_plantio, "cobertura": n_cob},
+            "P2O5": {"plantio": cfg["P2O5_plantio_kg_ha"], "cobertura": 0.0},
+            "K2O": {"plantio": k_plantio, "cobertura": k_cob},
+        }
+
+    # soja
+    k_plantio = min(cfg["K2O_total_kg_ha"], cfg["K2O_plantio_max_kg_ha"])
+    k_cob = max(0.0, cfg["K2O_total_kg_ha"] - k_plantio)
+    return {
+        "P2O5": {"plantio": cfg["P2O5_plantio_kg_ha"], "cobertura": 0.0},
+        "K2O": {"plantio": k_plantio, "cobertura": k_cob},
+    }
+
+
+def insumos_totais_para_talhao(
+    cultura: str,
+    largura_m: float,
+    comprimento_m: float,
+    overrides_por_hectare: Dict = None,
+) -> Dict[str, Dict[str, float]]:
+    """
+    Converte doses por hectare em totais por TALHÃO, a partir da área em hectares.
+    Retorna um dicionário {insumo: {plantio: kg_total, cobertura: kg_total}}.
+    """
+    area_m2, area_ha = area_retangular(largura_m, comprimento_m)
+    doses_ha = insumos_por_hectare(cultura, overrides_por_hectare)
+    totais = {}
+    for insumo, fases in doses_ha.items():
+        totais[insumo] = {
+            fase: round(qtd_kg_ha * area_ha, 4)  # kg totais no talhão
+            for fase, qtd_kg_ha in fases.items()
+        }
+    # Você pode querer incluir também a área no retorno para relatórios
+    totais["_area"] = {"m2": area_m2, "ha": area_ha}
+    return totais
+
+
+def pulverizacao_por_metro(
+    ml_por_metro: float,
+    largura_m: float,
+    comprimento_m: float,
+    espacamento_m: float,
+) -> Dict[str, float]:
+    """
+    Cálculo de pulverização baseada em 'mL por metro de rua'.
+    Retorna {'n_linhas': int, 'metros_totais': float, 'litros_totais': float}
+
+    litros_totais = (ml_por_metro * metros_totais) / 1000
+    """
+    if ml_por_metro <= 0:
+        raise ValueError("ml_por_metro deve ser positivo.")
+    n_linhas, metros_totais = metros_totais_de_rua(largura_m, comprimento_m, espacamento_m)
+    litros = (ml_por_metro * metros_totais) / 1000.0
+    return {
+        "n_linhas": n_linhas,
+        "metros_totais": round(metros_totais, 4),
+        "litros_totais": round(litros, 4),
+    }
+
+
+# Exemplos rápidos (pode remover depois ou colocar em testes)
+if __name__ == "__main__":
+    # Área
+    m2, ha = area_retangular(100, 200)   # 100m x 200m
+    print("Área m²:", m2, "Área ha:", ha)
+
+    # Ruas e pulverização (ex.: 500 mL por metro)
+    print("Ruas:", metros_totais_de_rua(100, 200, 0.45))
+    print("Pulverização:", pulverizacao_por_metro(500, 100, 200, 0.45))
+
+    # Insumos por hectare
+    print("Milho (kg/ha):", insumos_por_hectare("milho"))
+    print("Soja (kg/ha):", insumos_por_hectare("soja"))
+
+    # Totais por talhão (kg)
+    print("Totais talhão milho:", insumos_totais_para_talhao("milho", 100, 200))
+    print("Totais talhão soja:", insumos_totais_para_talhao("soja", 100, 200))
